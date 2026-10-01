@@ -1,0 +1,382 @@
+openapi: 3.0.3
+info:
+  title: EVE Healthcare — Diagnostic Bookings API
+  version: 1.0.0
+  description: |
+    Diagnostic test bookings with simulated payments and an idempotent payment webhook.
+    Errors have the shape `{"detail": "..."}` (validation errors add an `errors` array).
+    Trailing slashes are optional on every path.
+tags:
+  - name: auth
+  - name: catalogue
+  - name: bookings
+  - name: payments
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    Offset: { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
+        errors:
+          type: array
+          items: { type: object, properties: { path: { type: string }, message: { type: string } } }
+    Money: { type: string, example: '349.00', description: 'Decimal string, 2 places' }
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        full_name: { type: string }
+        is_admin: { type: boolean }
+    DiagnosticTest:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+    Centre:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        address: { type: string }
+        city: { type: string }
+        is_active: { type: boolean }
+    Offering:
+      type: object
+      properties:
+        test: { $ref: '#/components/schemas/DiagnosticTest' }
+        price: { $ref: '#/components/schemas/Money' }
+        is_available: { type: boolean }
+    Booking:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        centre_id: { type: integer }
+        test_id: { type: integer }
+        appointment_at: { type: string, format: date-time }
+        amount: { $ref: '#/components/schemas/Money' }
+        status: { type: string, enum: [PENDING, CONFIRMED, FAILED, CANCELLED] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Payment:
+      type: object
+      properties:
+        id: { type: integer }
+        booking_id: { type: integer }
+        amount: { $ref: '#/components/schemas/Money' }
+        status: { type: string, enum: [PENDING, SUCCESS, FAILED] }
+        provider_reference: { type: string, example: pay_3f1c9b2e... }
+        failure_reason: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        processed_at: { type: string, format: date-time, nullable: true }
+        booking_status: { type: string, enum: [PENDING, CONFIRMED, FAILED, CANCELLED] }
+    WebhookResult:
+      type: object
+      properties:
+        event_id: { type: string }
+        result: { type: string, enum: [processed, ignored, duplicate] }
+        payment_status: { type: string, enum: [PENDING, SUCCESS, FAILED] }
+        booking_status: { type: string, enum: [PENDING, CONFIRMED, FAILED, CANCELLED] }
+        detail: { type: string, nullable: true }
+    Page:
+      type: object
+      properties:
+        items: { type: array, items: {} }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      responses: { '200': { description: OK } }
+
+  /auth/signup:
+    post:
+      tags: [auth]
+      summary: Create a patient account (rate limited)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, full_name, password]
+              properties:
+                email: { type: string, format: email }
+                full_name: { type: string }
+                password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Get a JWT access token (rate limited)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, example: bearer }
+                  expires_in: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /auth/me:
+    get:
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /tests:
+    get:
+      tags: [catalogue]
+      summary: Test catalogue
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: search, in: query, schema: { type: string } }
+      responses: { '200': { description: Page of DiagnosticTest, content: { application/json: { schema: { $ref: '#/components/schemas/Page' } } } } }
+    post:
+      tags: [catalogue]
+      summary: Add a test to the catalogue (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: { name: { type: string }, description: { type: string } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/DiagnosticTest' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /centres:
+    get:
+      tags: [catalogue]
+      summary: List centres
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: city, in: query, schema: { type: string } }
+        - { name: test_id, in: query, description: Only centres currently offering this test, schema: { type: integer } }
+        - { name: include_inactive, in: query, schema: { type: boolean, default: false } }
+      responses: { '200': { description: Page of Centre, content: { application/json: { schema: { $ref: '#/components/schemas/Page' } } } } }
+    post:
+      tags: [catalogue]
+      summary: Create a centre (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, address, city]
+              properties: { name: { type: string }, address: { type: string }, city: { type: string } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Centre' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /centres/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [catalogue]
+      summary: Centre with the tests it offers and their prices
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Centre' }
+                  - type: object
+                    properties: { offerings: { type: array, items: { $ref: '#/components/schemas/Offering' } } }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [catalogue]
+      summary: Update or deactivate a centre (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                address: { type: string }
+                city: { type: string }
+                is_active: { type: boolean }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Centre' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /centres/{id}/tests:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [catalogue]
+      summary: Tests offered by a centre
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Offering' } } } } }
+    put:
+      tags: [catalogue]
+      summary: Add a test to a centre or change its price/availability (admin, upsert)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [test_id, price]
+              properties:
+                test_id: { type: integer }
+                price: { $ref: '#/components/schemas/Money' }
+                is_available: { type: boolean, default: true }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Offering' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /bookings:
+    get:
+      tags: [bookings]
+      summary: My bookings (admins see all)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { name: status, in: query, schema: { type: string, enum: [PENDING, CONFIRMED, FAILED, CANCELLED] } }
+      responses: { '200': { description: Page of Booking, content: { application/json: { schema: { $ref: '#/components/schemas/Page' } } } } }
+    post:
+      tags: [bookings]
+      summary: Book a diagnostic test
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [centre_id, test_id, appointment_at]
+              properties:
+                centre_id: { type: integer }
+                test_id: { type: integer }
+                appointment_at: { type: string, format: date-time, example: '2030-01-15T10:30:00+05:30' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Booking' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /bookings/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [bookings]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Booking' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /bookings/{id}/cancel:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [bookings]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Booking' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /payments:
+    post:
+      tags: [payments]
+      summary: Simulated payment for a booking
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: Replaying the same key returns the original payment (200) instead of paying again.
+          schema: { type: string, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [booking_id]
+              properties:
+                booking_id: { type: integer }
+                simulate_outcome:
+                  type: string
+                  enum: [SUCCESS, FAILED, PENDING]
+                  description: Force the outcome. PENDING waits for the webhook. Omit for a random outcome.
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+        '200': { description: Idempotent replay, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /payments/webhook:
+    post:
+      tags: [payments]
+      summary: Payment-status callback from the simulated provider (idempotent)
+      parameters:
+        - name: X-Webhook-Signature
+          in: header
+          required: true
+          description: hex(HMAC-SHA256(WEBHOOK_SECRET, raw request body))
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_id, payment_reference, status, amount]
+              properties:
+                event_id: { type: string }
+                payment_reference: { type: string }
+                status: { type: string, enum: [SUCCESS, FAILED] }
+                amount: { $ref: '#/components/schemas/Money' }
+                failure_reason: { type: string, nullable: true }
+      responses:
+        '200': { description: processed / ignored / duplicate, content: { application/json: { schema: { $ref: '#/components/schemas/WebhookResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
